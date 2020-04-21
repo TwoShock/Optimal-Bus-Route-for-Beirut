@@ -1,6 +1,7 @@
 import networkx as nx
 import matplotlib.pyplot as plt
 import random
+import osmnx as ox
 
 random.seed(42)
 def createRandomGraph(size = 1000,minPopulation = 500,maxPopulation = 20000,minEdgeWeight = 10,maxEdgeWeight = 100):
@@ -18,8 +19,9 @@ def plotGraph(G):
     plt.show()
 
 def main():
-    G = createRandomGraph(size = 25)
-    plotGraph(G)
+    G = ox.graph_from_place('Beirut,Lebanon', network_type='drive')
+    ox.plot_graph(G)
+    print(list(G.nodes(data=True))) 
     
 if __name__ == "__main__":
     main()
