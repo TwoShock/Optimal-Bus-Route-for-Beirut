@@ -1,5 +1,6 @@
 import pycuda.driver as cuda
 from pycuda.compiler import SourceModule
+import pycuda.autoinit
 import numpy as np
 import math
 import matplotlib.pyplot as plt
@@ -7,18 +8,20 @@ import osmnx as ox
 from sklearn.cluster import KMeans
 import random
 import time
+import pickle
 
-N =  3714
+
+N =  13319
 TPB = 32
-K = 64
+K = 25
 MAX_ITER = 500
 
 mod = SourceModule("""
 #include <stdio.h>
 
-#define N 3714
+#define N 13319
 #define TPB 32
-#define K 64
+#define K 25
 #define MAX_ITER 10
 
 __device__ float distance(float x1, float x2,float y1, float y2)
@@ -120,27 +123,31 @@ __global__ void kMeansCentroidUpdate(float *d_datapoints_X, float *d_datapoints_
 }
 """)
 
-G = ox.graph_from_place('Beirut,Lebanon', network_type='drive')
-ox.plot_graph(G)
-rawNodes = list(G.nodes(data=True))
-x = []
-y = []
-for node in rawNodes:
-    x.append(node[1]['x'])
-    y.append(node[1]['y'])
+#G = ox.graph_from_place('Beirut,Lebanon', network_type='drive')
+#ox.plot_graph(G)
+#rawNodes = list(G.nodes(data=True))
+#x = []
+#y = []
+#for node in rawNodes[0:N]:
+#    x.append(node[1]['x'])
+#    y.append(node[1]['y'])
 
+X = open('X.pkl','rb')
+Y = open('Y.pkl','rb')
+x_coord = pickle.load(X)
+y_coord = pickle.load(Y)
+X.close()
+Y.close()
 
-x_coord = x
-y_coord = y
 CPU_start = time.time()
 cpu =[]
-for i in range(len(x)):
-    cpu.append([x[i],y[i]])
+for i in range(len(x_coord)):
+    cpu.append([x_coord[i],y_coord[i]])
 cpu = np.array(cpu)
 kmeans = KMeans(n_clusters=K, random_state=0,max_iter=500).fit(cpu)
 
-for i in range(len(x)):
-    plt.plot(x[i],y[i],'.',color = 'blue')
+for i in range(len(x_coord)):
+    plt.plot(x_coord[i],y_coord[i],'.',color = 'blue')
     
 for i in range(len(kmeans.cluster_centers_)):
     plt.plot(kmeans.cluster_centers_[i][0],kmeans.cluster_centers_[i][1],'o',color='red')
@@ -211,11 +218,13 @@ cuda.memcpy_dtoh(h_centroids_Y, d_centroids_Y)
 cuda.memcpy_dtoh(h_clust_sizes, d_clust_sizes)
 print("GPU time = ",time.time()-GPU_start)
 
-for i in range(len(x)):
-    plt.plot(x[i],y[i],'.',color = 'blue')
+for i in range(len(x_coord)):
+    plt.plot(x_coord[i],y_coord[i],'.',color = 'blue')
     
+nodes = []    
 for i in range(K):
     plt.plot(h_centroids_X[i],h_centroids_Y[i],'o',color='red')
+    nodes.append((h_centroids_X[i],h_centroids_Y[i]))
 
 plt.show()
 
