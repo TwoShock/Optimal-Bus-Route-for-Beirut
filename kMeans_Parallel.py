@@ -11,17 +11,15 @@ import time
 import pickle
 
 
-N =  13319
 TPB = 32
-K = 25
+K = 26
 MAX_ITER = 500
 
 mod = SourceModule("""
 #include <stdio.h>
 
-#define N 13319
 #define TPB 32
-#define K 25
+#define K 26
 #define MAX_ITER 10
 
 __device__ float distance(float x1, float x2,float y1, float y2)
@@ -29,7 +27,7 @@ __device__ float distance(float x1, float x2,float y1, float y2)
 	return sqrt((x2-x1)*(x2-x1)+(y2-y1)*(y2-y1));
 }
 
-__global__ void kMeansClusterAssignment(float *d_datapoints_X,float *d_datapoints_Y, int *d_clust_assn, float *d_centroids_X,float *d_centroids_Y)
+__global__ void kMeansClusterAssignment(float *d_datapoints_X,float *d_datapoints_Y, int *d_clust_assn, float *d_centroids_X,float *d_centroids_Y,int N)
 {
 	//get idx for this datapoint
 	const int idx = blockIdx.x*blockDim.x + threadIdx.x;
@@ -67,7 +65,7 @@ __global__ void kMeansFinalStep(float *d_centroids_X,float *d_centroids_Y,int *d
 }
 
 
-__global__ void kMeansCentroidUpdate(float *d_datapoints_X, float *d_datapoints_Y, int *d_clust_assn, float *d_centroids_X,float *d_centroids_Y, int *d_clust_sizes)
+__global__ void kMeansCentroidUpdate(float *d_datapoints_X, float *d_datapoints_Y, int *d_clust_assn, float *d_centroids_X,float *d_centroids_Y, int *d_clust_sizes,int N)
 {
 
 	//get idx of thread at grid level
@@ -123,110 +121,74 @@ __global__ void kMeansCentroidUpdate(float *d_datapoints_X, float *d_datapoints_
 }
 """)
 
-#G = ox.graph_from_place('Beirut,Lebanon', network_type='drive')
-#ox.plot_graph(G)
-#rawNodes = list(G.nodes(data=True))
-#x = []
-#y = []
-#for node in rawNodes[0:N]:
-#    x.append(node[1]['x'])
-#    y.append(node[1]['y'])
+def CudaKMeans (x_coord,y_coord,N):
 
-X = open('X.pkl','rb')
-Y = open('Y.pkl','rb')
-x_coord = pickle.load(X)
-y_coord = pickle.load(Y)
-X.close()
-Y.close()
-
-CPU_start = time.time()
-cpu =[]
-for i in range(len(x_coord)):
-    cpu.append([x_coord[i],y_coord[i]])
-cpu = np.array(cpu)
-kmeans = KMeans(n_clusters=K, random_state=0,max_iter=500).fit(cpu)
-
-for i in range(len(x_coord)):
-    plt.plot(x_coord[i],y_coord[i],'.',color = 'blue')
+    h_centroids_X = np.zeros((K,),dtype = np.float32)
+    h_centroids_Y = np.zeros((K,),dtype = np.float32)
     
-for i in range(len(kmeans.cluster_centers_)):
-    plt.plot(kmeans.cluster_centers_[i][0],kmeans.cluster_centers_[i][1],'o',color='red')
-
-plt.show()
-print("CPU time = ",time.time()-CPU_start)
-
-GPU_start = time.time()
-h_centroids_X = np.zeros((K,),dtype = np.float32)
-h_centroids_Y = np.zeros((K,),dtype = np.float32)
-
-h_datapoints_X = np.zeros((N,),dtype = np.float32)
-h_datapoints_Y = np.zeros((N,),dtype = np.float32)
-
-h_clust_sizes =  np.zeros((K,),dtype = int)
-h_clust_assn = np.zeros((N,),dtype = int)
-
-d_centroids_X = cuda.mem_alloc(h_centroids_X.nbytes)
-d_centroids_Y = cuda.mem_alloc(h_centroids_Y.nbytes)
-
-d_datapoints_X = cuda.mem_alloc(h_datapoints_X.nbytes)
-d_datapoints_Y = cuda.mem_alloc(h_datapoints_Y.nbytes)
-
-d_clust_sizes = cuda.mem_alloc(h_clust_sizes.nbytes)
-d_clust_assn = cuda.mem_alloc(h_clust_assn.nbytes)
-
-for i in range(N):
-    h_datapoints_X[i] = x_coord[i]
-    h_datapoints_Y[i] = y_coord[i]
-
-for i in range(K):
-    seed = int(random.uniform(1,N))
-    h_centroids_X[i] = x_coord[seed]
-    h_centroids_Y[i] = y_coord[seed]
-
-cuda.memcpy_htod(d_centroids_X, h_centroids_X)
-cuda.memcpy_htod(d_centroids_Y, h_centroids_Y)
-
-cuda.memcpy_htod(d_datapoints_X, h_datapoints_X)
-cuda.memcpy_htod(d_datapoints_Y, h_datapoints_Y)
-
-cuda.memcpy_htod(d_clust_sizes, h_clust_sizes)
-
-cur_iter = 1;
-while cur_iter<MAX_ITER:
-    func = mod.get_function("kMeansClusterAssignment")
-    func(d_datapoints_X,d_datapoints_Y,d_clust_assn,d_centroids_X,d_centroids_Y, block=(TPB,1,1),grid=(math.ceil(N/TPB),1))
+    h_datapoints_X = np.zeros((N,),dtype = np.float32)
+    h_datapoints_Y = np.zeros((N,),dtype = np.float32)
+    
+    h_clust_sizes =  np.zeros((K,),dtype = int)
+    h_clust_assn = np.zeros((N,),dtype = int)
+    
+    d_centroids_X = cuda.mem_alloc(h_centroids_X.nbytes)
+    d_centroids_Y = cuda.mem_alloc(h_centroids_Y.nbytes)
+    
+    d_datapoints_X = cuda.mem_alloc(h_datapoints_X.nbytes)
+    d_datapoints_Y = cuda.mem_alloc(h_datapoints_Y.nbytes)
+    
+    d_clust_sizes = cuda.mem_alloc(h_clust_sizes.nbytes)
+    d_clust_assn = cuda.mem_alloc(h_clust_assn.nbytes)
+    
+    for i in range(N):
+        h_datapoints_X[i] = x_coord[i]
+        h_datapoints_Y[i] = y_coord[i]
+    
+    for i in range(K):
+        seed = int(random.uniform(1,N))
+        h_centroids_X[i] = x_coord[seed]
+        h_centroids_Y[i] = y_coord[seed]
+    
+    cuda.memcpy_htod(d_centroids_X, h_centroids_X)
+    cuda.memcpy_htod(d_centroids_Y, h_centroids_Y)
+    
+    cuda.memcpy_htod(d_datapoints_X, h_datapoints_X)
+    cuda.memcpy_htod(d_datapoints_Y, h_datapoints_Y)
+    
+    cuda.memcpy_htod(d_clust_sizes, h_clust_sizes)
+    
+    cur_iter = 1;
+    while cur_iter<MAX_ITER:
+        func = mod.get_function("kMeansClusterAssignment")
+        func(d_datapoints_X,d_datapoints_Y,d_clust_assn,d_centroids_X,d_centroids_Y, np.int32(N),block=(TPB,1,1),grid=(math.ceil(N/TPB),1))
+        cuda.memcpy_dtoh(h_clust_assn, d_clust_assn)
+        
+        temp = np.zeros((K,),dtype = np.float32)
+        cuda.memcpy_htod(d_centroids_X,temp)
+        cuda.memcpy_htod(d_centroids_Y,temp)
+        
+        temp = np.zeros((K,),dtype = int)
+        cuda.memcpy_htod(d_clust_sizes,temp)
+        
+        func = mod.get_function("kMeansCentroidUpdate")
+        func(d_datapoints_X,d_datapoints_Y,d_clust_assn,d_centroids_X,d_centroids_Y,d_clust_sizes, np.int32(N),block=(TPB,1,1),grid=(math.ceil(N/TPB),1))
+    
+        func = mod.get_function("kMeansFinalStep")
+        func(d_centroids_X,d_centroids_Y,d_clust_sizes, block=(TPB,1,1),grid=(math.ceil(K/TPB),1))
+    
+        cur_iter+=1
+    
     cuda.memcpy_dtoh(h_clust_assn, d_clust_assn)
+    cuda.memcpy_dtoh(h_centroids_X, d_centroids_X)
+    cuda.memcpy_dtoh(h_centroids_Y, d_centroids_Y)
+    cuda.memcpy_dtoh(h_clust_sizes, d_clust_sizes)
     
-    temp = np.zeros((K,),dtype = np.float32)
-    cuda.memcpy_htod(d_centroids_X,temp)
-    cuda.memcpy_htod(d_centroids_Y,temp)
+        
+    nodes = []    
+    for i in range(K):
+        nodes.append([h_centroids_X[i],h_centroids_Y[i]])
     
-    temp = np.zeros((K,),dtype = int)
-    cuda.memcpy_htod(d_clust_sizes,temp)
-    
-    func = mod.get_function("kMeansCentroidUpdate")
-    func(d_datapoints_X,d_datapoints_Y,d_clust_assn,d_centroids_X,d_centroids_Y,d_clust_sizes, block=(TPB,1,1),grid=(math.ceil(N/TPB),1))
-
-    func = mod.get_function("kMeansFinalStep")
-    func(d_centroids_X,d_centroids_Y,d_clust_sizes, block=(TPB,1,1),grid=(math.ceil(K/TPB),1))
-
-    cur_iter+=1
-
-cuda.memcpy_dtoh(h_clust_assn, d_clust_assn)
-cuda.memcpy_dtoh(h_centroids_X, d_centroids_X)
-cuda.memcpy_dtoh(h_centroids_Y, d_centroids_Y)
-cuda.memcpy_dtoh(h_clust_sizes, d_clust_sizes)
-print("GPU time = ",time.time()-GPU_start)
-
-for i in range(len(x_coord)):
-    plt.plot(x_coord[i],y_coord[i],'.',color = 'blue')
-    
-nodes = []    
-for i in range(K):
-    plt.plot(h_centroids_X[i],h_centroids_Y[i],'o',color='red')
-    nodes.append((h_centroids_X[i],h_centroids_Y[i]))
-
-plt.show()
-
+    return np.array(nodes)
 
 
