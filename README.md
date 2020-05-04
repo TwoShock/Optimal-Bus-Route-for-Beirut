@@ -1,5 +1,6 @@
 # Optimal-Bus-Route-for-Beirut
 Implementing Parallel-Kmeans on networkx graph using pycuda
+<img src="map.jpeg">
 # Running the script
 Make sure you have conda package manager setup.<br />
 `conda create --name <env> --file requirements.txt`.  
