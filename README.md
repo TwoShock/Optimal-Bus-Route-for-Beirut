@@ -1,6 +1,6 @@
-# Optimal-Bus-Route-for-Beirut
-<img src="map.jpeg" style="float:left"/>
-# Running the script
+<h1>Optimal-Bus-Route-for-Beirut</h1>
+<img src="map.jpeg"/>
+<h1> Running the script</h1>
 If you have conda setup then proceed with the remainder of this section.
 <br />
 If you do not have conda you can install it <a href = "https://docs.conda.io/projects/conda/en/latest/user-guide/install/">here</a>
