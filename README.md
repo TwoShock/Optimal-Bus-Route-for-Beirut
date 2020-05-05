@@ -1,5 +1,5 @@
 <h1>Optimal-Bus-Route-for-Beirut</h1>
-<h1> <img src="dinosaur.jpg"> </h1>
+<h1> <img src="ants.png"> </h1>
 <h1> Running the script</h1>
 If you have conda setup then proceed with the remainder of this section.
 <br />
