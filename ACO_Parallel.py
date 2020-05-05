@@ -2,16 +2,8 @@ import pycuda.driver as cuda
 from pycuda.compiler import SourceModule
 import pycuda.autoinit
 import numpy as np
-import matplotlib.pyplot as plt
-import osmnx as ox
-import time
-import pickle
-import networkx as nx
-import pants
 import random
 import math
-from cuda_kmeans import CudaKMeans
-import geopy.distance
 
 mod = SourceModule("""
 #include <stdio.h>
@@ -19,43 +11,25 @@ mod = SourceModule("""
 #include <curand.h>
 #include <curand_kernel.h>
 
-#define index(length, line, column) (column + line * length) 
+#define Idx1D(width, i, j) (i*width+j)
+
 extern "C" {
-    __global__ void evaporate(double* pheromoneValues, int numberOfCities, double evaporationRate) {
-        /*
-        This function modifies the pheremone trail to account for the evaporation constant
-        */
-        int edgeID = threadIdx.x + blockIdx.x * blockDim.x;
-        pheromoneValues[edgeID] = pheromoneValues[edgeID] * evaporationRate;
-    }
+__global__ void ConstructTour(int* tour, int* visited, double* choice, double* prob, int N) {
 
-    __global__ void reinforcePath(double* pheromoneValues, int* distances, int* pathArray, int numberOfCities, double reinforcementAmount) {
+        int idx = blockDim.x * blockIdx.x + threadIdx.x;
 
-        int currentXThread = threadIdx.x + blockIdx.x * blockDim.x;
+        for (int step = 1; step < N; step++) {
 
-        int source = pathArray[currentXThread];
-        int dest = pathArray[currentXThread + 1];
-        int idx = index(numberOfCities, source, dest);
-        pheromoneValues[idx] = pheromoneValues[idx] + reinforcementAmount;
-        pheromoneValues[index(numberOfCities, dest, source)] = pheromoneValues[index(numberOfCities, dest, source)] + reinforcementAmount;
-    }
+            int current = tour[Idx1D(N, idx, step - 1)];
+            double currentProb = 0.0;
 
-    __global__ void constructTour(int* tourArray, int* visitedArray, double* choiceInfo, double* probabilityArray, int numberOfCities) {
-
-        int currentXThread = blockDim.x * blockIdx.x + threadIdx.x;
-
-        for (int step = 1; step < numberOfCities; step++) {
-
-            int current = tourArray[index(numberOfCities, currentXThread, step - 1)];
-            double currentProbabilitySum = 0.0;
-
-            for (int i = 0; i < numberOfCities; i++) {
-                if (visitedArray[index(numberOfCities, currentXThread, i)] == 1)
-                    probabilityArray[index(numberOfCities, currentXThread, i)] = 0.0;
+            for (int i = 0; i < N; i++) {
+                if (visited[Idx1D(N, idx, i)] == 1)
+                    prob[Idx1D(N, idx, i)] = 0.0;
                 else {
-                    double currentProbability = choiceInfo[index(numberOfCities, current, i)];
-                    probabilityArray[index(numberOfCities, currentXThread, i)] = currentProbability;
-                    currentProbabilitySum = currentProbabilitySum + currentProbability;
+                    double temp = choice[Idx1D(N, current, i)];
+                    prob[Idx1D(N, idx, i)] = temp;
+                    currentProb = currentProb + temp;
                 }
             }
 
@@ -63,168 +37,179 @@ extern "C" {
             curandState_t state;
             curand_init((unsigned long long) clock(), 0, 0, &state);
             random = curand_uniform(&state);
-            random = random * currentProbabilitySum;
+            random = random * currentProb;
 
             int next;
-            double sum = probabilityArray[index(numberOfCities, currentXThread, 0)];
+            double sum = prob[Idx1D(N, idx, 0)];
 
             for (next = 0; sum < random; next++) {
-                sum += probabilityArray[index(numberOfCities, currentXThread, next + 1)];
+                sum =sum+ prob[Idx1D(N, idx, next + 1)];
             }
 
-            tourArray[index(numberOfCities, currentXThread, step)] = next;
-            visitedArray[index(numberOfCities, currentXThread, next)] = 1;
+            tour[Idx1D(N, idx, step)] = next;
+            visited[Idx1D(N, idx, next)] = 1;
         }
     }
+    __global__ void Evaporate(double* pheromone, int N, double evapRate) {
+        /*
+        This function modifies the pheremone trail to account for the evaporation constant
+        */
+        int idx = threadIdx.x + blockIdx.x * blockDim.x;
+        pheromone[idx] = pheromone[idx] * evapRate;
+    }
+
+    __global__ void Reinforce(double* pheromone, int* distances, int* path, int N, double amount) {
+
+        int currentXThread = threadIdx.x + blockIdx.x * blockDim.x;
+
+        int source = path[currentXThread];
+        int dest = path[currentXThread + 1];
+        int idx = Idx1D(N, source, dest);
+        pheromone[idx] = pheromone[idx] + amount;
+        pheromone[Idx1D(N, dest, source)] = pheromone[Idx1D(N, dest, source)] + amount;
+    }
+
 }
 """,no_extern_c=True)
 
-
-
-INF = 65536 
-ITERATIONS = 50
-INTIALPHEREMONEAMOUNT = 1.0
-EVAPORATION_CONSTANT = 0.5
+INF = math.pow(2,30) #2^31 causes overflow
+INITIAL_PHEROMONE = 0.5
+EVAPORATION_CONSTANT = 0.8
 ALPHA = 1
-BETA = 2
+BETA = 3
+MAX_ITER = 100
+
+def Idx1D(width, i, j):
+    return i * width + j
+
+def dimBlockCalc(nbAnts):
+	blocks = int(math.log(nbAnts))
+	return int(math.pow(2, blocks))
 
 
-def index(length, line, column):
-    return (column + line * length) 
-
-def threads(numberOfAnts):
-    n_threds = 1
-    while(n_threds * 2 <numberOfAnts):
-        n_threds*= 2
-    return n_threds
-
-def threadsPerBlock(numberOfAnts):
-	blocks = math.log(numberOfAnts)
-	return math.pow(2, blocks)
-
-def evaporate (pheromones,numberOfCities):
-    pheremoneDeviceArray = np.empty_like(pheromones)
-    
-    pheremoneDeviceArray = cuda.mem_alloc(pheromones.nbytes)
-    cuda.memcpy_htod(pheremoneDeviceArray,pheromones)
-    func = mod.get_function("evaporate")
-    func(pheremoneDeviceArray, np.int32(numberOfCities), np.int32(EVAPORATION_CONSTANT),block = (numberOfCities,1,1),grid = (numberOfCities,1))
-    cuda.memcpy_dtoh(pheromones,pheremoneDeviceArray)
-    return pheromones
-
-def reinforce(pheromones,distanceArray, path,numberOfCities):
-    amount = float(1.0 / calcPathCost (distanceArray, path, numberOfCities))
-    
-    path_device = np.empty_like(path)
-    distanceArray_device = np.empty_like(distanceArray)
-    pheremoneDeviceArray = np.empty_like(pheromones)
-    
-    path_device = cuda.mem_alloc(path.nbytes)
-    distanceArray_device = cuda.mem_alloc(distanceArray.nbytes)
-    pheremoneDeviceArray = cuda.mem_alloc(pheromones.nbytes)
-
-    cuda.memcpy_htod(path_device,path)
-    cuda.memcpy_htod(distanceArray_device,distanceArray)
-    cuda.memcpy_htod(pheremoneDeviceArray,pheromones)
-    
-    func = mod.get_function("reinforcePath")
-    func(pheremoneDeviceArray, distanceArray_device, path_device, np.int32(numberOfCities),np.float32(amount),block=(1,1,1),grid=(numberOfCities,1))
-    
-    cuda.memcpy_dtoh(distanceArray,distanceArray_device)
-    cuda.memcpy_dtoh(pheromones,pheremoneDeviceArray)
-    
-    return (pheromones,distanceArray)
-
-
-def calcPathCost (distanceArray,path, numberOfCities):
+def calculateCost (distances,path, N):
     cost = 0
-    for count in range(numberOfCities-1):
-        idx = index(numberOfCities, path [count], path [count + 1])
-        if idx<INF:
-            cost += distanceArray[idx]
-        else:
-            cost+=INF
+    for i in range(N-1):
+        idx = Idx1D(N, path [i], path [i + 1])
+        cost += distances[idx]
     return cost 
 
+def evaporate (pheromone,N):
+    pheromoneDevice = np.empty_like(pheromone)
+    
+    pheromoneDevice = cuda.mem_alloc(pheromone.nbytes)
+    cuda.memcpy_htod(pheromoneDevice,pheromone)
+    func = mod.get_function("Evaporate")
+    func(pheromoneDevice, np.int32(N), np.int32(EVAPORATION_CONSTANT),block = (N,1,1),grid = (N,1))
+    cuda.memcpy_dtoh(pheromone,pheromoneDevice)
+    return pheromone
 
-def bestSolution (tours, distanceArray, numberOfAnts, numberOfCities):
+def reinforce(pheromone,distances, path,N):
+    amount = float(1.0 / calculateCost (distances, path, N))
+    
+    path_device = np.empty_like(path)
+    distancesDevice = np.empty_like(distances)
+    pheromoneDevice = np.empty_like(pheromone)
+    
+    path_device = cuda.mem_alloc(path.nbytes)
+    distanceArray_device = cuda.mem_alloc(distances.nbytes)
+    pheromoneDevice = cuda.mem_alloc(pheromone.nbytes)
+
+    cuda.memcpy_htod(path_device,path)
+    cuda.memcpy_htod(distanceArray_device,distances)
+    cuda.memcpy_htod(pheromoneDevice,pheromone)
+    
+    func = mod.get_function("Reinforce")
+    func(pheromoneDevice, distanceArray_device, path_device, np.int32(N),np.float32(amount),block=(N-1,1,1),grid=(1,1))
+    
+    cuda.memcpy_dtoh(distances,distancesDevice)
+    cuda.memcpy_dtoh(pheromone,pheromoneDevice)
+    
+    return (pheromone,distances)
+
+
+
+def bestSolution (tours, distances, numberOfAnts, N):
     bestTour = tours
     for tour in range(numberOfAnts):
-        bestCost = calcPathCost(distanceArray, bestTour, numberOfCities)
-        currentCost = calcPathCost(distanceArray,tours [index (numberOfCities, tour, 0):], numberOfCities)
+        bestCost = calculateCost(distances, bestTour, N)
+        currentCost = calculateCost(distances,tours [Idx1D (N, tour, 0):], N)
         if (currentCost<bestCost): 
-            bestTour = tours[index(numberOfCities, tour, 0):]
+            bestTour = tours[Idx1D(N, tour, 0):]
     return bestTour
 	
 
-def run (distanceArray, numberOfCities, numberOfAnts):
+def cudaACO (distances, N, nbAnts):
     
-    pheromones = np.empty((numberOfCities*numberOfCities,),dtype=np.float32)
-    tours = np.empty((numberOfCities*numberOfAnts,),dtype=int)
-    visited = np.empty((numberOfCities*numberOfAnts,),dtype=int)
-    choiceInfo = np.empty((numberOfCities*numberOfCities,),dtype=np.float32)
+    pheromone = np.empty((N*N,),dtype=np.float32)
+    choice = np.empty((N*N,),dtype=np.float32)
+
+    tours = np.empty((N*nbAnts,),dtype=int)
+    visited = np.empty((N*nbAnts,),dtype=int)
     
     
-    distanceArray_device = np.empty_like(distanceArray)
+    distancesDevice = np.empty_like(distances)
     tours_device = np.empty_like(tours)
     visited_device = np.empty_like(visited)
-    choiceInfo_device = np.empty_like(choiceInfo)
-    probabilityArray = np.empty_like(pheromones)
+    choiceInfo_device = np.empty_like(choice)
+    probDevice = np.empty_like(pheromone)
     
-    distanceArray_device = cuda.mem_alloc(distanceArray.nbytes)
-    tours_device = cuda.mem_alloc(tours.nbytes)
-    visited_device = cuda.mem_alloc(visited.nbytes)
-    choiceInfo_device = cuda.mem_alloc(choiceInfo.nbytes)
-    probabilityArray = cuda.mem_alloc(pheromones.nbytes)
+    distancesDevice= cuda.mem_alloc(distances.nbytes)
+    toursDevice = cuda.mem_alloc(tours.nbytes)
+    visitedDevice = cuda.mem_alloc(visited.nbytes)
+    choiceDevice = cuda.mem_alloc(choice.nbytes)
+    probDevice = cuda.mem_alloc(pheromone.nbytes)
 
-    cuda.memcpy_htod(distanceArray_device,distanceArray)
+    cuda.memcpy_htod(distancesDevice,distances)
     
-    for i in range(numberOfCities):
-        for j in range(numberOfCities):
-            pheromones [index (numberOfCities, i, j)] = INTIALPHEREMONEAMOUNT
+    for i in range(N):
+        for j in range(N):
+            pheromone [Idx1D (N, i, j)] = INITIAL_PHEROMONE
             
-    for iteration in range(ITERATIONS):
+    for iteration in range(MAX_ITER):
 
-        for i in range(numberOfAnts):
-            for j in range(numberOfCities):
-                tours [index(numberOfCities, i, j)] = INF 
+        for i in range(nbAnts):
+            for j in range(N):
+                tours [Idx1D(N, i, j)] = INF 
         
-        for i in range(numberOfAnts):
-            for j in range(numberOfCities):
-                visited [index (numberOfCities, i, j)] = 0 
+        for i in range(nbAnts):
+            for j in range(N):
+                visited [Idx1D (N, i, j)] = 0 
                 
-        for i in range(numberOfCities):
-            for j in range(numberOfCities):
-                edge_pherom = pheromones [index (numberOfCities, i, j)]
-                edge_weight = distanceArray [index (numberOfCities, i, j)]
+        for i in range(N):
+            for j in range(N):
+                edge_pherom = pheromone [Idx1D (N, i, j)]
+                edge_weight = distances [Idx1D (N, i, j)]
                 prob = 0.0
                 if (edge_weight != 0):
                     prob = math.pow(edge_pherom, ALPHA) * math.pow((1 / edge_weight), BETA)
                 else:
                     prob = math.pow(edge_pherom, ALPHA) * math.pow(INF, BETA)
-                choiceInfo [index (numberOfCities, i, j)] = prob
+                choice [Idx1D (N, i, j)] = prob
         
-        cuda.memcpy_htod(choiceInfo_device,choiceInfo)
+        cuda.memcpy_htod(choiceDevice,choice)
         
-        for ant in range(numberOfAnts):
-            init = int(random.uniform(0,numberOfCities))
-            tours[index(numberOfCities, ant, 0)] = init
-            visited [index (numberOfCities, ant, init)] = 1
+        for ant in range(nbAnts):
+            init = int(random.uniform(0,N))
+            tours[Idx1D(N, ant, 0)] = init
+            visited [Idx1D (N, ant, init)] = 1
         
         cuda.memcpy_htod(visited_device,visited)
         cuda.memcpy_htod(tours_device,tours)
         
-        gridDim = int(numberOfAnts / threadsPerBlock(numberOfAnts))
-        antsPerBlock = int(threadsPerBlock (numberOfAnts))
+        b = dimBlockCalc(nbAnts)
+        dimGrid = int(nbAnts / b)
+        antsPerBlock = int(b)
         
-        func = mod.get_function("constructTour")
-        func(tours_device, visited_device, choiceInfo_device, probabilityArray, np.int32(numberOfCities),block = (antsPerBlock,1,1),grid = (gridDim,1))
+        func = mod.get_function("ConstructTour")
+        func(toursDevice, visitedDevice, choiceDevice, probDevice, np.int32(N),block = (antsPerBlock,1,1),grid = (dimGrid,1))
         
-        cuda.memcpy_dtoh(tours,tours_device)
-        cuda.memcpy_dtoh(visited,visited_device)
+        cuda.memcpy_dtoh(tours,toursDevice)
+        cuda.memcpy_dtoh(visited,visitedDevice)
         
-        pheromones = evaporate (pheromones, numberOfCities)
-        best = bestSolution (tours, distanceArray, numberOfAnts, numberOfCities)
-        pheromones,distanceArray = reinforce (pheromones, distanceArray, best, numberOfCities) 
-    best = bestSolution (tours, distanceArray, numberOfAnts, numberOfCities)
+        pheromone = evaporate (pheromone, N)
+        best = bestSolution (tours, distances, nbAnts, N)
+        pheromones,distanceArray = reinforce (pheromone, distances, best, N) 
+    best = bestSolution (tours, distances, nbAnts, N)
     return best 
+
